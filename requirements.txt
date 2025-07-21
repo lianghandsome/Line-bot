@@ -1,3 +1,4 @@
 Flask
 line-bot-sdk
 gunicorn
+pytz==2025.2

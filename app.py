@@ -3,7 +3,7 @@ import os
 import json
 from datetime import datetime, timedelta
 import re
-import pytz  # 新增：處理時區
+from zoneinfo import ZoneInfo  # 使用 Python 內建時區處理
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -22,7 +22,7 @@ configuration = Configuration(access_token=ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
 # 設定台灣時區
-TAIWAN_TZ = pytz.timezone('Asia/Taipei')
+TAIWAN_TZ = ZoneInfo('Asia/Taipei')
 
 def get_taiwan_time():
     """取得台灣當前時間"""
@@ -298,4 +298,3 @@ def handle_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
-    
