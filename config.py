@@ -1,0 +1,6 @@
+# config.py
+import os
+
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
+DATABASE_URL = os.getenv("DATABASE_URL")
