@@ -3,6 +3,7 @@ import os
 import json
 from datetime import datetime, timedelta
 import re
+import sqlite3 # 導入 SQLite
 from linebot.v3 import (
     WebhookHandler
 )
@@ -26,109 +27,161 @@ from linebot.v3.webhooks import (
 
 app = Flask(__name__)
 
+# LINE Bot 配置
 configuration = Configuration(access_token='IOjd7xRA4ZwlMNxS6H57U1KixD3RtvE3d4P4iAeVYdSbTMANZmKIooyvK98EEUgds3M/nkOubYsJNTNu5Z8rnEbULqAGyicU/bN5nh4OZVqeDmIE/2K5RNvlXsrCKqtjJ1yBJ6FRmmQW5LNxc6NdggdB04t89/1O/w1cDnyilFU=')
-
 handler = WebhookHandler('69258da7d559a4ef4709a9ba6dcbb1b1')
 
+# --- 修改 TodoManager 類別以使用 SQLite ---
 class TodoManager:
-    def __init__(self, data_file='todos.json'):
-        self.data_file = data_file
-        self.todos = self.load_data()
+    def __init__(self, db_file='data/todos.db'):
+        self.db_file = db_file
+        self._init_db()
     
-    def load_data(self):
-        """從檔案載入資料"""
-        try:
-            if os.path.exists(self.data_file):
-                with open(self.data_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            return {}
-        except Exception as e:
-            print(f"載入資料失敗: {e}")
-            return {}
-    
-    def save_data(self):
-        """儲存資料到檔案"""
-        try:
-            with open(self.data_file, 'w', encoding='utf-8') as f:
-                json.dump(self.todos, f, ensure_ascii=False, indent=2)
-            return True
-        except Exception as e:
-            print(f"儲存資料失敗: {e}")
-            return False
-    
+    def _init_db(self):
+        """初始化資料庫並創建表格"""
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS todos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                task TEXT NOT NULL,
+                deadline TEXT,
+                priority TEXT DEFAULT '一般',
+                completed INTEGER DEFAULT 0,
+                created_at TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
     def add_todo(self, user_id, task, deadline=None, priority='一般'):
-        if user_id not in self.todos:
-            self.todos[user_id] = []
-        
-        # 計算新的 ID (避免重複)
-        existing_ids = [todo['id'] for todo in self.todos[user_id]]
-        new_id = max(existing_ids) + 1 if existing_ids else 1
-        
-        todo_item = {
-            'id': new_id,
-            'task': task,
-            'deadline': deadline,
-            'priority': priority,
-            'completed': False,
-            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M')
-        }
-        
-        self.todos[user_id].append(todo_item)
-        self.save_data()  # 立即儲存
-        return todo_item['id']
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        created_at = datetime.now().strftime('%Y-%m-%d %H:%M')
+        cursor.execute(
+            "INSERT INTO todos (user_id, task, deadline, priority, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, task, deadline, priority, 0, created_at)
+        )
+        todo_id = cursor.lastrowid # 獲取新插入任務的 ID
+        conn.commit()
+        conn.close()
+        return todo_id
     
     def get_todos(self, user_id, show_completed=False):
-        if user_id not in self.todos:
-            return []
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
         
-        todos = self.todos[user_id]
+        query = "SELECT id, task, deadline, priority, completed, created_at FROM todos WHERE user_id = ?"
+        params = [user_id]
+        
         if not show_completed:
-            todos = [todo for todo in todos if not todo['completed']]
+            query += " AND completed = 0"
         
-        return sorted(todos, key=lambda x: (x['completed'], x.get('deadline') or '9999-12-31'))
+        # 排序邏輯
+        query += " ORDER BY completed ASC, deadline ASC, id ASC"
+            
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        todos = []
+        for row in rows:
+            todos.append({
+                'id': row[0],
+                'task': row[1],
+                'deadline': row[2],
+                'priority': row[3],
+                'completed': bool(row[4]), # SQLite 0/1 轉換為 True/False
+                'created_at': row[5]
+            })
+        conn.close()
+        return todos
     
     def complete_todo(self, user_id, todo_id):
-        if user_id in self.todos:
-            for todo in self.todos[user_id]:
-                if todo['id'] == todo_id:
-                    todo['completed'] = True
-                    self.save_data()  # 立即儲存
-                    return True
-        return False
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE todos SET completed = 1 WHERE user_id = ? AND id = ?",
+            (user_id, todo_id)
+        )
+        rows_affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return rows_affected > 0
     
     def delete_todo(self, user_id, todo_id):
-        if user_id in self.todos:
-            original_count = len(self.todos[user_id])
-            self.todos[user_id] = [todo for todo in self.todos[user_id] if todo['id'] != todo_id]
-            if len(self.todos[user_id]) < original_count:
-                self.save_data()  # 立即儲存
-                return True
-        return False
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM todos WHERE user_id = ? AND id = ?",
+            (user_id, todo_id)
+        )
+        rows_affected = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return rows_affected > 0
     
     def get_today_todos(self, user_id):
         today = datetime.now().strftime('%Y-%m-%d')
-        todos = self.get_todos(user_id)
-        return [todo for todo in todos if todo.get('deadline', '').startswith(today)]
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, task, deadline, priority, completed, created_at FROM todos WHERE user_id = ? AND deadline = ? AND completed = 0 ORDER BY id ASC",
+            (user_id, today)
+        )
+        rows = cursor.fetchall()
+        todos = []
+        for row in rows:
+            todos.append({
+                'id': row[0],
+                'task': row[1],
+                'deadline': row[2],
+                'priority': row[3],
+                'completed': bool(row[4]),
+                'created_at': row[5]
+            })
+        conn.close()
+        return todos
     
     def get_urgent_todos(self, user_id):
-        todos = self.get_todos(user_id)
-        return [todo for todo in todos if todo['priority'] == '緊急']
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, task, deadline, priority, completed, created_at FROM todos WHERE user_id = ? AND priority = '緊急' AND completed = 0 ORDER BY id ASC",
+            (user_id,)
+        )
+        rows = cursor.fetchall()
+        todos = []
+        for row in rows:
+            todos.append({
+                'id': row[0],
+                'task': row[1],
+                'deadline': row[2],
+                'priority': row[3],
+                'completed': bool(row[4]),
+                'created_at': row[5]
+            })
+        conn.close()
+        return todos
 
     def get_user_stats(self, user_id):
-        """取得使用者統計資訊"""
-        if user_id not in self.todos:
-            return {"total": 0, "completed": 0, "pending": 0}
+        conn = sqlite3.connect(self.db_file)
+        cursor = conn.cursor()
         
-        todos = self.todos[user_id]
-        total = len(todos)
-        completed = len([t for t in todos if t['completed']])
+        cursor.execute("SELECT COUNT(*) FROM todos WHERE user_id = ?", (user_id,))
+        total = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM todos WHERE user_id = ? AND completed = 1", (user_id,))
+        completed = cursor.fetchone()[0]
+        
         pending = total - completed
-        
+        conn.close()
         return {"total": total, "completed": completed, "pending": pending}
 
-# 建立全域 TodoManager 實例
-todo_manager = TodoManager()
+# 建立全域 TodoManager 實例，現在使用 SQLite 資料庫檔案
+todo_manager = TodoManager(db_file='data/todos.db')
 
+# --- 接下來的 Flask 路由和 Line Bot 處理邏輯保持不變 ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
