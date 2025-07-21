@@ -30,19 +30,42 @@ configuration = Configuration(access_token='IOjd7xRA4ZwlMNxS6H57U1KixD3RtvE3d4P4
 
 handler = WebhookHandler('69258da7d559a4ef4709a9ba6dcbb1b1')
 
-# 用字典儲存每個用戶的待辦事項 (實際應用中建議用資料庫)
-user_todos = {}
-
 class TodoManager:
-    def __init__(self):
-        self.todos = {}
+    def __init__(self, data_file='todos.json'):
+        self.data_file = data_file
+        self.todos = self.load_data()
+    
+    def load_data(self):
+        """從檔案載入資料"""
+        try:
+            if os.path.exists(self.data_file):
+                with open(self.data_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            return {}
+        except Exception as e:
+            print(f"載入資料失敗: {e}")
+            return {}
+    
+    def save_data(self):
+        """儲存資料到檔案"""
+        try:
+            with open(self.data_file, 'w', encoding='utf-8') as f:
+                json.dump(self.todos, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception as e:
+            print(f"儲存資料失敗: {e}")
+            return False
     
     def add_todo(self, user_id, task, deadline=None, priority='一般'):
         if user_id not in self.todos:
             self.todos[user_id] = []
         
+        # 計算新的 ID (避免重複)
+        existing_ids = [todo['id'] for todo in self.todos[user_id]]
+        new_id = max(existing_ids) + 1 if existing_ids else 1
+        
         todo_item = {
-            'id': len(self.todos[user_id]) + 1,
+            'id': new_id,
             'task': task,
             'deadline': deadline,
             'priority': priority,
@@ -51,6 +74,7 @@ class TodoManager:
         }
         
         self.todos[user_id].append(todo_item)
+        self.save_data()  # 立即儲存
         return todo_item['id']
     
     def get_todos(self, user_id, show_completed=False):
@@ -68,13 +92,17 @@ class TodoManager:
             for todo in self.todos[user_id]:
                 if todo['id'] == todo_id:
                     todo['completed'] = True
+                    self.save_data()  # 立即儲存
                     return True
         return False
     
     def delete_todo(self, user_id, todo_id):
         if user_id in self.todos:
+            original_count = len(self.todos[user_id])
             self.todos[user_id] = [todo for todo in self.todos[user_id] if todo['id'] != todo_id]
-            return True
+            if len(self.todos[user_id]) < original_count:
+                self.save_data()  # 立即儲存
+                return True
         return False
     
     def get_today_todos(self, user_id):
@@ -86,6 +114,19 @@ class TodoManager:
         todos = self.get_todos(user_id)
         return [todo for todo in todos if todo['priority'] == '緊急']
 
+    def get_user_stats(self, user_id):
+        """取得使用者統計資訊"""
+        if user_id not in self.todos:
+            return {"total": 0, "completed": 0, "pending": 0}
+        
+        todos = self.todos[user_id]
+        total = len(todos)
+        completed = len([t for t in todos if t['completed']])
+        pending = total - completed
+        
+        return {"total": total, "completed": completed, "pending": pending}
+
+# 建立全域 TodoManager 實例
 todo_manager = TodoManager()
 
 @app.route("/callback", methods=['POST'])
@@ -101,6 +142,25 @@ def callback():
         abort(400)
 
     return 'OK'
+
+@app.route("/", methods=['GET'])
+def home():
+    """簡單的健康檢查頁面"""
+    return "LINE Bot 待辦事項助手正在運行中！"
+
+@app.route("/debug/<user_id>", methods=['GET'])
+def debug_user(user_id):
+    """除錯使用者資料的端點"""
+    todos = todo_manager.get_todos(user_id, show_completed=True)
+    stats = todo_manager.get_user_stats(user_id)
+    
+    debug_info = {
+        "user_id": user_id,
+        "stats": stats,
+        "todos": todos
+    }
+    
+    return f"<pre>{json.dumps(debug_info, ensure_ascii=False, indent=2)}</pre>"
 
 def parse_date(date_str):
     """解析日期字串"""
@@ -134,7 +194,7 @@ def parse_date(date_str):
         return None
 
 def create_todo_menu():
-    """創建待辦事項選單"""
+    """建立待辦事項選單"""
     return TemplateMessage(
         alt_text='待辦事項選單',
         template=ButtonsTemplate(
@@ -165,18 +225,21 @@ def format_todo_list(todos, title="📋 你的待辦事項"):
         result += f"\n{status} [{todo['id']}] {priority} {todo['task']}\n"
         
         if todo.get('deadline'):
-            deadline_date = datetime.strptime(todo['deadline'], '%Y-%m-%d')
-            today = datetime.now()
-            days_diff = (deadline_date - today).days
-            
-            if days_diff < 0:
-                result += f"   ⏰ 已過期 ({todo['deadline']}) ⚠️\n"
-            elif days_diff == 0:
-                result += f"   ⏰ 今天到期！\n"
-            elif days_diff == 1:
-                result += f"   ⏰ 明天到期\n"
-            else:
-                result += f"   ⏰ {todo['deadline']} ({days_diff}天後)\n"
+            try:
+                deadline_date = datetime.strptime(todo['deadline'], '%Y-%m-%d')
+                today = datetime.now()
+                days_diff = (deadline_date.date() - today.date()).days
+                
+                if days_diff < 0:
+                    result += f"   ⏰ 已過期 ({todo['deadline']}) ⚠️\n"
+                elif days_diff == 0:
+                    result += f"   ⏰ 今天到期！\n"
+                elif days_diff == 1:
+                    result += f"   ⏰ 明天到期\n"
+                else:
+                    result += f"   ⏰ {todo['deadline']} ({days_diff}天後)\n"
+            except:
+                result += f"   ⏰ {todo['deadline']}\n"
         
         result += f"   📅 建立時間: {todo['created_at']}\n"
     
@@ -190,6 +253,12 @@ def format_todo_list(todos, title="📋 你的待辦事項"):
 def get_smart_reply(user_message, user_id):
     """智能回應函數"""
     message = user_message.strip()
+    
+    # 除錯指令 (僅用於測試)
+    if message == "除錯":
+        stats = todo_manager.get_user_stats(user_id)
+        todos = todo_manager.get_todos(user_id, show_completed=True)
+        return f"📊 使用者統計:\n總任務: {stats['total']}\n已完成: {stats['completed']}\n未完成: {stats['pending']}\n\n目前有 {len(todos)} 個任務", "text"
     
     # 待辦事項主選單
     if any(word in message for word in ['待辦', '行事曆', '任務', 'todo', '選單']):
@@ -330,7 +399,10 @@ def get_smart_reply(user_message, user_id):
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_message = event.message.text
-    user_id = event.source.user_id  # 取得用戶ID
+    user_id = event.source.user_id  # 取得使用者ID
+    
+    # 記錄日誌以便除錯
+    print(f"收到訊息: {user_message}, 使用者ID: {user_id}")
     
     reply_content, reply_type = get_smart_reply(user_message, user_id)
     
@@ -353,5 +425,8 @@ def handle_message(event):
             )
 
 if __name__ == "__main__":
+    # 確保資料目錄存在
+    os.makedirs('data', exist_ok=True)
+    
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=True)
