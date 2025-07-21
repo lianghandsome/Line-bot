@@ -3,7 +3,7 @@ import os
 import json
 from datetime import datetime, timedelta
 import re
-from zoneinfo import ZoneInfo  # 使用 Python 內建時區處理
+from zoneinfo import ZoneInfo
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -24,12 +24,39 @@ handler = WebhookHandler(CHANNEL_SECRET)
 # 設定台灣時區
 TAIWAN_TZ = ZoneInfo('Asia/Taipei')
 
+# 資料檔案路徑
+DATA_FILE = 'user_notes.json'
+
 def get_taiwan_time():
     """取得台灣當前時間"""
     return datetime.now(TAIWAN_TZ)
 
-# 簡單的記憶體儲存（重啟後會清空）
-user_notes = {}
+def load_user_notes():
+    """從檔案載入使用者記事"""
+    try:
+        if os.path.exists(DATA_FILE):
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {}
+    except Exception as e:
+        print(f"載入資料時發生錯誤: {e}")
+        return {}
+
+def save_user_notes(user_notes):
+    """將使用者記事儲存到檔案"""
+    try:
+        # 確保目錄存在
+        os.makedirs(os.path.dirname(DATA_FILE) if os.path.dirname(DATA_FILE) else '.', exist_ok=True)
+        
+        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(user_notes, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"儲存資料時發生錯誤: {e}")
+        return False
+
+# 載入現有資料
+user_notes = load_user_notes()
 
 def parse_date(date_str):
     """解析日期字串"""
@@ -64,20 +91,32 @@ def parse_date(date_str):
     except:
         return None
 
-class SimpleNoteManager:
+class PersistentNoteManager:
     def add_note(self, user_id, note_text, deadline=None):
         """新增記事"""
         if user_id not in user_notes:
             user_notes[user_id] = []
         
+        # 找出新的 ID（避免重複）
+        existing_ids = [note['id'] for note in user_notes[user_id]]
+        new_id = max(existing_ids, default=0) + 1
+        
         note = {
-            'id': len(user_notes[user_id]) + 1,
+            'id': new_id,
             'text': note_text,
             'deadline': deadline,
-            'time': get_taiwan_time().strftime('%Y-%m-%d %H:%M')  # 使用台灣時間
+            'time': get_taiwan_time().strftime('%Y-%m-%d %H:%M'),
+            'created_timestamp': get_taiwan_time().timestamp()  # 加入時間戳記用於排序
         }
         user_notes[user_id].append(note)
-        return note['id']
+        
+        # 儲存到檔案
+        if save_user_notes(user_notes):
+            return new_id
+        else:
+            # 如果儲存失敗，從記憶體中移除
+            user_notes[user_id].pop()
+            return None
     
     def get_notes(self, user_id):
         """取得所有記事（按截止日期排序）"""
@@ -87,7 +126,9 @@ class SimpleNoteManager:
             if note['deadline']:
                 return (0, note['deadline'])  # 有截止日期的優先
             else:
-                return (1, note['time'])  # 沒有截止日期的按建立時間排序
+                # 使用 created_timestamp，如果沒有則用時間字串
+                timestamp = note.get('created_timestamp', 0)
+                return (1, timestamp)
         
         return sorted(notes, key=sort_key)
     
@@ -100,6 +141,7 @@ class SimpleNoteManager:
         for i, note in enumerate(notes):
             if note['id'] == note_id:
                 del notes[i]
+                save_user_notes(user_notes)  # 儲存變更
                 return True
         return False
     
@@ -107,11 +149,12 @@ class SimpleNoteManager:
         """清空所有記事"""
         if user_id in user_notes:
             user_notes[user_id] = []
+            save_user_notes(user_notes)  # 儲存變更
             return True
         return False
 
 # 建立記事管理器
-note_manager = SimpleNoteManager()
+note_manager = PersistentNoteManager()
 
 def format_deadline_status(deadline):
     """格式化截止日期狀態"""
@@ -162,7 +205,10 @@ def handle_user_message(message, user_id):
         
         note_id = note_manager.add_note(user_id, note_content, deadline)
         
-        response = f"✅ 記事已儲存！\n📝 內容: {note_content}\n🆔 編號: {note_id}\n⏰ 建立時間: {get_taiwan_time().strftime('%H:%M')}"  # 使用台灣時間
+        if note_id is None:
+            return "❌ 儲存記事時發生錯誤，請稍後再試"
+        
+        response = f"✅ 記事已儲存！\n📝 內容: {note_content}\n🆔 編號: {note_id}\n⏰ 建立時間: {get_taiwan_time().strftime('%H:%M')}"
         if deadline:
             response += f"\n📅 截止日期: {deadline}"
             response += f"\n{format_deadline_status(deadline)}"
@@ -185,13 +231,13 @@ def handle_user_message(message, user_id):
             else:
                 result += "📌 無截止日期\n"
         
-        result += f"\n💡 刪除記事: 刪除 [編號]"
+        result += f"\n💡 刪除記事: 刪除 [編號]\n🗃️ 資料已持久儲存，重啟後不會消失"
         return result
     
     # 查看今日到期的記事
     elif any(word in message for word in ['今日', '今天', '到期', 'today']):
         notes = note_manager.get_notes(user_id)
-        today = get_taiwan_time().strftime('%Y-%m-%d')  # 使用台灣時間
+        today = get_taiwan_time().strftime('%Y-%m-%d')
         today_notes = [note for note in notes if note['deadline'] == today]
         
         if not today_notes:
@@ -203,6 +249,16 @@ def handle_user_message(message, user_id):
             result += f"⏰ 今天到期！🟠\n"
         
         return result
+    
+    # 資料狀態檢查（新增功能）
+    elif any(word in message for word in ['狀態', 'status', '檢查', '資料']):
+        total_notes = sum(len(notes) for notes in user_notes.values())
+        user_note_count = len(user_notes.get(user_id, []))
+        
+        file_exists = os.path.exists(DATA_FILE)
+        file_size = os.path.getsize(DATA_FILE) if file_exists else 0
+        
+        return f"📊 系統狀態:\n\n📁 資料檔案: {'✅ 存在' if file_exists else '❌ 不存在'}\n📏 檔案大小: {file_size} bytes\n👤 你的記事: {user_note_count} 則\n🌐 總記事數: {total_notes} 則\n💾 資料持久化: ✅ 啟用"
     
     # 刪除記事
     elif message.startswith('刪除 '):
@@ -235,6 +291,7 @@ def handle_user_message(message, user_id):
 • 查看 - 所有記事
 • 記事 - 所有記事  
 • 今日 - 今天到期的記事
+• 狀態 - 檢查系統狀態
 
 🗑️ 刪除記事:
 • 刪除 [編號]
@@ -251,15 +308,19 @@ def handle_user_message(message, user_id):
 • 記 繳電費 12-31
 • 查看
 • 今日
-• 刪除 1"""
+• 刪除 1
+
+🗃️ 資料持久化:
+記事會自動儲存到檔案，
+服務重啟後不會消失！"""
     
     # 問候語
     elif any(word in message for word in ['你好', 'hello', 'hi', '嗨']):
-        return "👋 哈囉！我是記事機器人！\n\n📝 快速開始:\n• 記 內容 - 新增記事\n• 記 內容 日期 - 新增有截止日期的記事\n• 查看 - 看所有記事\n• 今日 - 看今天到期的記事\n• 幫助 - 完整功能說明"
+        return "👋 哈囉！我是記事機器人！\n\n📝 快速開始:\n• 記 內容 - 新增記事\n• 記 內容 日期 - 新增有截止日期的記事\n• 查看 - 看所有記事\n• 今日 - 看今天到期的記事\n• 幫助 - 完整功能說明\n\n🗃️ 你的記事會自動儲存，不會因為服務重啟而消失！"
     
     # 預設回應
     else:
-        return f"🤔 不太懂「{message}」的意思\n\n💡 試試這些:\n• 記 今天要做的事 明天\n• 查看\n• 今日\n• 幫助"
+        return f"🤔 不太懂「{message}」的意思\n\n💡 試試這些:\n• 記 今天要做的事 明天\n• 查看\n• 今日\n• 狀態\n• 幫助"
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -275,7 +336,22 @@ def callback():
 
 @app.route("/", methods=['GET'])
 def home():
-    return "記事機器人運行中 🤖"
+    # 顯示系統狀態
+    total_notes = sum(len(notes) for notes in user_notes.values())
+    file_exists = os.path.exists(DATA_FILE)
+    file_size = os.path.getsize(DATA_FILE) if file_exists else 0
+    
+    return f"""
+    <h1>📝 記事機器人運行中 🤖</h1>
+    <h3>系統狀態:</h3>
+    <ul>
+        <li>📁 資料檔案: {'✅ 存在' if file_exists else '❌ 不存在'}</li>
+        <li>📏 檔案大小: {file_size} bytes</li>
+        <li>🌐 總記事數: {total_notes} 則</li>
+        <li>💾 資料持久化: ✅ 啟用</li>
+        <li>⏰ 伺服器時間: {get_taiwan_time().strftime('%Y-%m-%d %H:%M:%S')} (台灣時間)</li>
+    </ul>
+    """
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
