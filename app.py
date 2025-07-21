@@ -3,6 +3,7 @@ import os
 import json
 from datetime import datetime, timedelta
 import re
+import pytz  # 新增：處理時區
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
@@ -20,6 +21,13 @@ CHANNEL_SECRET = '69258da7d559a4ef4709a9ba6dcbb1b1'
 configuration = Configuration(access_token=ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
 
+# 設定台灣時區
+TAIWAN_TZ = pytz.timezone('Asia/Taipei')
+
+def get_taiwan_time():
+    """取得台灣當前時間"""
+    return datetime.now(TAIWAN_TZ)
+
 # 簡單的記憶體儲存（重啟後會清空）
 user_notes = {}
 
@@ -34,7 +42,7 @@ def parse_date(date_str):
                 if fmt in ['%m-%d', '%m/%d']:
                     # 如果只有月日，加上今年
                     date_obj = datetime.strptime(date_str, fmt)
-                    current_year = datetime.now().year
+                    current_year = get_taiwan_time().year  # 使用台灣時間的年份
                     return date_obj.replace(year=current_year).strftime('%Y-%m-%d')
                 else:
                     return datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
@@ -42,7 +50,7 @@ def parse_date(date_str):
                 continue
                 
         # 處理相對日期
-        today = datetime.now()
+        today = get_taiwan_time()  # 使用台灣時間
         if '今天' in date_str or '今日' in date_str:
             return today.strftime('%Y-%m-%d')
         elif '明天' in date_str or '明日' in date_str:
@@ -66,7 +74,7 @@ class SimpleNoteManager:
             'id': len(user_notes[user_id]) + 1,
             'text': note_text,
             'deadline': deadline,
-            'time': datetime.now().strftime('%Y-%m-%d %H:%M')
+            'time': get_taiwan_time().strftime('%Y-%m-%d %H:%M')  # 使用台灣時間
         }
         user_notes[user_id].append(note)
         return note['id']
@@ -112,7 +120,7 @@ def format_deadline_status(deadline):
     
     try:
         deadline_date = datetime.strptime(deadline, '%Y-%m-%d')
-        today = datetime.now()
+        today = get_taiwan_time()  # 使用台灣時間
         days_diff = (deadline_date.date() - today.date()).days
         
         if days_diff < 0:
@@ -154,7 +162,7 @@ def handle_user_message(message, user_id):
         
         note_id = note_manager.add_note(user_id, note_content, deadline)
         
-        response = f"✅ 記事已儲存！\n📝 內容: {note_content}\n🆔 編號: {note_id}\n⏰ 建立時間: {datetime.now().strftime('%H:%M')}"
+        response = f"✅ 記事已儲存！\n📝 內容: {note_content}\n🆔 編號: {note_id}\n⏰ 建立時間: {get_taiwan_time().strftime('%H:%M')}"  # 使用台灣時間
         if deadline:
             response += f"\n📅 截止日期: {deadline}"
             response += f"\n{format_deadline_status(deadline)}"
@@ -183,7 +191,7 @@ def handle_user_message(message, user_id):
     # 查看今日到期的記事
     elif any(word in message for word in ['今日', '今天', '到期', 'today']):
         notes = note_manager.get_notes(user_id)
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = get_taiwan_time().strftime('%Y-%m-%d')  # 使用台灣時間
         today_notes = [note for note in notes if note['deadline'] == today]
         
         if not today_notes:
