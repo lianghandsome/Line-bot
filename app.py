@@ -1,7 +1,8 @@
 from flask import Flask, request, abort
 import os
-import random
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
+import re
 from linebot.v3 import (
     WebhookHandler
 )
@@ -14,9 +15,6 @@ from linebot.v3.messaging import (
     MessagingApi,
     ReplyMessageRequest,
     TextMessage,
-    AudioMessage,
-    ImageMessage,
-    StickerMessage,
     TemplateMessage,
     ButtonsTemplate,
     MessageAction
@@ -32,48 +30,63 @@ configuration = Configuration(access_token='IOjd7xRA4ZwlMNxS6H57U1KixD3RtvE3d4P4
 
 handler = WebhookHandler('69258da7d559a4ef4709a9ba6dcbb1b1')
 
-# 音樂資料庫
-MUSIC_DATABASE = {
-    "流行": {
-        "songs": [
-            {"title": "告白氣球", "artist": "周杰倫", "youtube": "https://youtu.be/bu7nU9Mhpyo", "emoji": "🎈"},
-            {"title": "說愛你", "artist": "蔡依林", "youtube": "https://youtu.be/OWIp0jSPMLU", "emoji": "💕"},
-            {"title": "稻香", "artist": "周杰倫", "youtube": "https://youtu.be/WsS8w15XALA", "emoji": "🌾"},
-            {"title": "小幸運", "artist": "田馥甄", "youtube": "https://youtu.be/8kLDEa_6GE8", "emoji": "🍀"},
-        ]
-    },
-    "搖滾": {
-        "songs": [
-            {"title": "Born to Be Wild", "artist": "Steppenwolf", "youtube": "https://youtu.be/rMbATaj7Il8", "emoji": "🔥"},
-            {"title": "Don't Stop Believin'", "artist": "Journey", "youtube": "https://youtu.be/1k8craCGpgs", "emoji": "⚡"},
-            {"title": "We Will Rock You", "artist": "Queen", "youtube": "https://youtu.be/-tJYN-eG1zk", "emoji": "👑"},
-        ]
-    },
-    "放鬆": {
-        "songs": [
-            {"title": "River Flows in You", "artist": "Yiruma", "youtube": "https://youtu.be/7maJOI3QMu0", "emoji": "🎹"},
-            {"title": "Canon in D", "artist": "Pachelbel", "youtube": "https://youtu.be/NlprozGcs80", "emoji": "🎻"},
-            {"title": "Clair de Lune", "artist": "Debussy", "youtube": "https://youtu.be/CvFH_6DNRCY", "emoji": "🌙"},
-        ]
-    },
-    "電音": {
-        "songs": [
-            {"title": "Faded", "artist": "Alan Walker", "youtube": "https://youtu.be/60ItHLz5WEA", "emoji": "🎧"},
-            {"title": "Titanium", "artist": "David Guetta", "youtube": "https://youtu.be/JRfuAukYTKg", "emoji": "💎"},
-            {"title": "Animals", "artist": "Martin Garrix", "youtube": "https://youtu.be/gCYcHz2k5x0", "emoji": "🦁"},
-        ]
-    }
-}
+# 用字典儲存每個用戶的待辦事項 (實際應用中建議用資料庫)
+user_todos = {}
 
-# 心情音樂推薦
-MOOD_MUSIC = {
-    "開心": ["流行", "電音"],
-    "難過": ["放鬆", "流行"],
-    "生氣": ["搖滾", "電音"],
-    "放鬆": ["放鬆"],
-    "興奮": ["搖滾", "電音"],
-    "浪漫": ["流行", "放鬆"]
-}
+class TodoManager:
+    def __init__(self):
+        self.todos = {}
+    
+    def add_todo(self, user_id, task, deadline=None, priority='一般'):
+        if user_id not in self.todos:
+            self.todos[user_id] = []
+        
+        todo_item = {
+            'id': len(self.todos[user_id]) + 1,
+            'task': task,
+            'deadline': deadline,
+            'priority': priority,
+            'completed': False,
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M')
+        }
+        
+        self.todos[user_id].append(todo_item)
+        return todo_item['id']
+    
+    def get_todos(self, user_id, show_completed=False):
+        if user_id not in self.todos:
+            return []
+        
+        todos = self.todos[user_id]
+        if not show_completed:
+            todos = [todo for todo in todos if not todo['completed']]
+        
+        return sorted(todos, key=lambda x: (x['completed'], x.get('deadline') or '9999-12-31'))
+    
+    def complete_todo(self, user_id, todo_id):
+        if user_id in self.todos:
+            for todo in self.todos[user_id]:
+                if todo['id'] == todo_id:
+                    todo['completed'] = True
+                    return True
+        return False
+    
+    def delete_todo(self, user_id, todo_id):
+        if user_id in self.todos:
+            self.todos[user_id] = [todo for todo in self.todos[user_id] if todo['id'] != todo_id]
+            return True
+        return False
+    
+    def get_today_todos(self, user_id):
+        today = datetime.now().strftime('%Y-%m-%d')
+        todos = self.get_todos(user_id)
+        return [todo for todo in todos if todo.get('deadline', '').startswith(today)]
+    
+    def get_urgent_todos(self, user_id):
+        todos = self.get_todos(user_id)
+        return [todo for todo in todos if todo['priority'] == '緊急']
+
+todo_manager = TodoManager()
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -89,140 +102,242 @@ def callback():
 
     return 'OK'
 
-def get_random_song(genre=None):
-    """隨機取得一首歌"""
-    if genre and genre in MUSIC_DATABASE:
-        songs = MUSIC_DATABASE[genre]["songs"]
-    else:
-        all_songs = []
-        for genre_data in MUSIC_DATABASE.values():
-            all_songs.extend(genre_data["songs"])
-        songs = all_songs
-    
-    return random.choice(songs)
+def parse_date(date_str):
+    """解析日期字串"""
+    try:
+        # 處理不同的日期格式
+        date_formats = ['%Y-%m-%d', '%m-%d', '%Y/%m/%d', '%m/%d']
+        
+        for fmt in date_formats:
+            try:
+                if fmt in ['%m-%d', '%m/%d']:
+                    # 如果只有月日，加上今年
+                    date_obj = datetime.strptime(date_str, fmt)
+                    current_year = datetime.now().year
+                    return date_obj.replace(year=current_year).strftime('%Y-%m-%d')
+                else:
+                    return datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
+            except ValueError:
+                continue
+                
+        # 處理相對日期
+        today = datetime.now()
+        if '今天' in date_str or '今日' in date_str:
+            return today.strftime('%Y-%m-%d')
+        elif '明天' in date_str or '明日' in date_str:
+            return (today + timedelta(days=1)).strftime('%Y-%m-%d')
+        elif '後天' in date_str:
+            return (today + timedelta(days=2)).strftime('%Y-%m-%d')
+        
+        return None
+    except:
+        return None
 
-def get_music_by_mood(mood):
-    """根據心情推薦音樂"""
-    if mood in MOOD_MUSIC:
-        recommended_genres = MOOD_MUSIC[mood]
-        chosen_genre = random.choice(recommended_genres)
-        return get_random_song(chosen_genre), chosen_genre
-    else:
-        return get_random_song(), "隨機"
-
-def create_music_buttons():
-    """創建音樂類型選擇按鈕"""
+def create_todo_menu():
+    """創建待辦事項選單"""
     return TemplateMessage(
-        alt_text='選擇音樂類型',
+        alt_text='待辦事項選單',
         template=ButtonsTemplate(
-            title='🎵 選擇你想聽的音樂類型',
-            text='點擊下方按鈕來探索不同類型的音樂！',
+            title='📅 我的待辦事項助手',
+            text='選擇你要進行的操作：',
             actions=[
-                MessageAction(label='🎤 流行音樂', text='推薦流行音樂'),
-                MessageAction(label='🎸 搖滾音樂', text='推薦搖滾音樂'),
-                MessageAction(label='🎹 放鬆音樂', text='推薦放鬆音樂'),
-                MessageAction(label='🎧 電音', text='推薦電音')
+                MessageAction(label='📋 查看待辦事項', text='查看待辦事項'),
+                MessageAction(label='📝 新增待辦事項', text='如何新增待辦事項'),
+                MessageAction(label='⏰ 今日待辦', text='今日待辦'),
+                MessageAction(label='❗ 緊急事項', text='緊急事項')
             ]
         )
     )
 
-def get_smart_reply(user_message):
+def format_todo_list(todos, title="📋 你的待辦事項"):
+    """格式化待辦事項列表"""
+    if not todos:
+        return f"{title}\n\n目前沒有待辦事項！\n輸入「新增 任務內容」來添加第一個任務 📝"
+    
+    result = f"{title}\n"
+    result += "=" * 20 + "\n"
+    
+    for todo in todos:
+        status = "✅" if todo['completed'] else "⭕"
+        priority_emoji = {"緊急": "🔥", "重要": "⚡", "一般": "📌"}
+        priority = priority_emoji.get(todo['priority'], "📌")
+        
+        result += f"\n{status} [{todo['id']}] {priority} {todo['task']}\n"
+        
+        if todo.get('deadline'):
+            deadline_date = datetime.strptime(todo['deadline'], '%Y-%m-%d')
+            today = datetime.now()
+            days_diff = (deadline_date - today).days
+            
+            if days_diff < 0:
+                result += f"   ⏰ 已過期 ({todo['deadline']}) ⚠️\n"
+            elif days_diff == 0:
+                result += f"   ⏰ 今天到期！\n"
+            elif days_diff == 1:
+                result += f"   ⏰ 明天到期\n"
+            else:
+                result += f"   ⏰ {todo['deadline']} ({days_diff}天後)\n"
+        
+        result += f"   📅 建立時間: {todo['created_at']}\n"
+    
+    result += f"\n💡 小提示：\n"
+    result += f"• 輸入「完成 [編號]」標記完成\n"
+    result += f"• 輸入「刪除 [編號]」刪除項目\n"
+    result += f"• 輸入「新增 任務內容」添加新任務"
+    
+    return result
+
+def get_smart_reply(user_message, user_id):
     """智能回應函數"""
-    message = user_message.lower()
+    message = user_message.strip()
     
-    # 音樂相關功能
-    if any(word in message for word in ['音樂', 'music', '歌', '聽歌']):
-        return create_music_buttons(), "template"
+    # 待辦事項主選單
+    if any(word in message for word in ['待辦', '行事曆', '任務', 'todo', '選單']):
+        return create_todo_menu(), "template"
     
-    elif any(word in message for word in ['推薦流行', '流行音樂']):
-        song = get_random_song("流行")
-        return f"🎤 推薦流行歌曲：\n\n{song['emoji']} 《{song['title']}》\n🎤 {song['artist']}\n\n🎵 YouTube: {song['youtube']}\n\n想聽更多嗎？輸入「音樂」來選擇其他類型！", "text"
+    # 新增待辦事項
+    elif message.startswith('新增 ') or message.startswith('加入 ') or message.startswith('添加 '):
+        task_content = message[3:].strip()  # 移除「新增 」
+        
+        # 解析優先級
+        priority = '一般'
+        if '緊急' in task_content or '急' in task_content:
+            priority = '緊急'
+            task_content = task_content.replace('緊急', '').replace('急', '').strip()
+        elif '重要' in task_content:
+            priority = '重要'
+            task_content = task_content.replace('重要', '').strip()
+        
+        # 解析截止日期
+        deadline = None
+        date_pattern = r'(\d{4}-\d{2}-\d{2}|\d{1,2}-\d{1,2}|\d{4}/\d{1,2}/\d{1,2}|\d{1,2}/\d{1,2}|今天|明天|後天)'
+        date_match = re.search(date_pattern, task_content)
+        
+        if date_match:
+            date_str = date_match.group(1)
+            deadline = parse_date(date_str)
+            task_content = re.sub(date_pattern, '', task_content).strip()
+        
+        if not task_content:
+            return "❌ 請輸入任務內容！\n\n範例：\n• 新增 買牛奶\n• 新增 開會 2024-07-25\n• 新增 緊急 繳電費 明天", "text"
+        
+        todo_id = todo_manager.add_todo(user_id, task_content, deadline, priority)
+        
+        response = f"✅ 成功新增待辦事項！\n\n"
+        response += f"📌 任務: {task_content}\n"
+        response += f"🏷️ 優先級: {priority}\n"
+        if deadline:
+            response += f"⏰ 截止日期: {deadline}\n"
+        response += f"🆔 編號: {todo_id}\n\n"
+        response += "輸入「查看待辦事項」來查看所有任務！"
+        
+        return response, "text"
     
-    elif any(word in message for word in ['推薦搖滾', '搖滾音樂']):
-        song = get_random_song("搖滾")
-        return f"🎸 推薦搖滾歌曲：\n\n{song['emoji']} 《{song['title']}》\n🎤 {song['artist']}\n\n🎵 YouTube: {song['youtube']}\n\n搖滾萬歲！🤘", "text"
+    # 查看待辦事項
+    elif any(word in message for word in ['查看待辦', '待辦事項', '任務列表', '查看任務']):
+        todos = todo_manager.get_todos(user_id)
+        return format_todo_list(todos), "text"
     
-    elif any(word in message for word in ['推薦放鬆', '放鬆音樂']):
-        song = get_random_song("放鬆")
-        return f"🎹 推薦放鬆音樂：\n\n{song['emoji']} 《{song['title']}》\n🎤 {song['artist']}\n\n🎵 YouTube: {song['youtube']}\n\n好好放鬆一下吧～ ☁️", "text"
+    # 今日待辦
+    elif any(word in message for word in ['今日待辦', '今天的任務', '今天待辦']):
+        today_todos = todo_manager.get_today_todos(user_id)
+        return format_todo_list(today_todos, "⏰ 今日待辦事項"), "text"
     
-    elif any(word in message for word in ['推薦電音', '電音']):
-        song = get_random_song("電音")
-        return f"🎧 推薦電音：\n\n{song['emoji']} 《{song['title']}》\n🎤 {song['artist']}\n\n🎵 YouTube: {song['youtube']}\n\n準備好跳舞了嗎？💃🕺", "text"
+    # 緊急事項
+    elif any(word in message for word in ['緊急事項', '緊急任務', '急件']):
+        urgent_todos = todo_manager.get_urgent_todos(user_id)
+        return format_todo_list(urgent_todos, "🔥 緊急事項"), "text"
     
-    # 心情推薦
-    elif any(word in message for word in ['開心', '快樂', '高興']):
-        song, genre = get_music_by_mood("開心")
-        return f"😊 你很開心呢！推薦這首{genre}歌曲：\n\n{song['emoji']} 《{song['title']}》\n🎤 {song['artist']}\n\n🎵 {song['youtube']}\n\n保持好心情！✨", "text"
+    # 完成任務
+    elif message.startswith('完成 ') or message.startswith('做完 '):
+        try:
+            todo_id = int(message.split(' ')[1])
+            if todo_manager.complete_todo(user_id, todo_id):
+                return f"🎉 太棒了！任務 {todo_id} 已標記為完成！\n\n繼續保持，你做得很好！💪", "text"
+            else:
+                return f"❌ 找不到編號 {todo_id} 的任務。\n\n輸入「查看待辦事項」確認編號。", "text"
+        except (IndexError, ValueError):
+            return "❌ 請輸入正確格式：完成 [編號]\n\n例如：完成 1", "text"
     
-    elif any(word in message for word in ['難過', '傷心', '憂鬱']):
-        song, genre = get_music_by_mood("難過")
-        return f"😔 心情不好嗎？這首歌也許能陪伴你：\n\n{song['emoji']} 《{song['title']}》\n🎤 {song['artist']}\n\n🎵 {song['youtube']}\n\n一切都會好起來的 💙", "text"
+    # 刪除任務
+    elif message.startswith('刪除 ') or message.startswith('移除 '):
+        try:
+            todo_id = int(message.split(' ')[1])
+            if todo_manager.delete_todo(user_id, todo_id):
+                return f"🗑️ 已刪除任務 {todo_id}！", "text"
+            else:
+                return f"❌ 找不到編號 {todo_id} 的任務。", "text"
+        except (IndexError, ValueError):
+            return "❌ 請輸入正確格式：刪除 [編號]\n\n例如：刪除 1", "text"
     
-    elif any(word in message for word in ['生氣', '憤怒', '火大']):
-        song, genre = get_music_by_mood("生氣")
-        return f"😠 發洩一下情緒吧！\n\n{song['emoji']} 《{song['title']}》\n🎤 {song['artist']}\n\n🎵 {song['youtube']}\n\n讓音樂帶走負面情緒！🔥", "text"
+    # 使用說明
+    elif any(word in message for word in ['如何新增', '怎麼新增', '新增方法', '使用說明']):
+        return """📝 新增待辦事項說明：
+
+🔤 基本格式：
+新增 任務內容
+
+📅 含日期：
+新增 任務內容 日期
+• 新增 買牛奶 今天
+• 新增 開會 2024-07-25  
+• 新增 繳費 12-25
+
+🏷️ 設定優先級：
+• 新增 緊急 繳稅 明天
+• 新增 重要 面試 2024-08-01
+
+💡 更多範例：
+• 新增 買菜
+• 新增 看醫生 明天
+• 新增 緊急 報告 後天
+• 新增 重要 會議 8-15
+
+試試看吧！""", "text"
     
-    # 隨機音樂
-    elif any(word in message for word in ['隨機', '隨便', '不知道聽什麼']):
-        song = get_random_song()
-        return f"🎲 隨機推薦：\n\n{song['emoji']} 《{song['title']}》\n🎤 {song['artist']}\n\n🎵 {song['youtube']}\n\n驚喜總是最棒的！🎁", "text"
-    
-    # 其他功能
+    # 問候語
     elif any(word in message for word in ['你好', 'hello', 'hi', '嗨']):
-        return "🎵 哈囉！我是你的音樂小助手！\n\n想聽音樂嗎？試試說：\n• 「音樂」- 選擇音樂類型\n• 「開心」- 心情音樂推薦\n• 「隨機」- 隨機歌曲\n\n讓我們一起享受音樂吧！🎶", "text"
+        return "👋 哈囉！我是你的個人待辦事項助手！\n\n📋 我可以幫你：\n• 記錄要做的事情\n• 設定截止日期\n• 提醒緊急任務\n• 追蹤完成進度\n\n輸入「待辦」開始使用，或「使用說明」看教學！", "text"
     
+    # 幫助
     elif any(word in message for word in ['幫助', 'help', '功能']):
-        return """🎵 音樂機器人功能列表：
+        return """📱 待辦事項機器人功能：
 
-🎼 音樂推薦：
-• 「音樂」→ 選擇音樂類型
-• 「流行」「搖滾」「放鬆」「電音」
+📝 新增任務：
+• 新增 [任務內容]
+• 新增 [任務] [日期]
+• 新增 緊急/重要 [任務]
 
-💭 心情音樂：
-• 「開心」「難過」「生氣」
-• 根據心情推薦適合的歌曲
+📋 查看任務：
+• 查看待辦事項 - 所有未完成
+• 今日待辦 - 今天要做的
+• 緊急事項 - 緊急任務
 
-🎲 其他功能：
-• 「隨機」→ 隨機推薦
-• 「時間」→ 查看現在時間
-• 「笑話」→ 程式笑話
+✅ 管理任務：
+• 完成 [編號] - 標記完成
+• 刪除 [編號] - 刪除任務
 
-試試看吧！🎶""", "text"
-    
-    elif any(word in message for word in ['時間', 'time', '現在幾點']):
-        now = datetime.now()
-        return f"🕐 現在時間：{now.strftime('%Y-%m-%d %H:%M:%S')}\n\n要不要聽首歌配配時間？說「音樂」來選擇吧！🎵", "text"
-    
-    elif any(word in message for word in ['笑話', 'joke']):
-        jokes = [
-            "為什麼音樂家都很瘦？因為他們一直在減「音」！🎵😂",
-            "什麼樂器最容易感冒？「薩克斯風」，因為它一直在吹！🎷🤧",
-            "為什麼鋼琴家手指這麼靈活？因為他們會「彈」性工作！🎹✨",
-            "DJ 最怕什麼？怕「混」不下去！🎧😱"
-        ]
-        return random.choice(jokes), "text"
+🎯 其他：
+• 待辦 - 主選單
+• 使用說明 - 詳細教學
+
+現在就試試「新增 買晚餐」吧！""", "text"
     
     # 預設回應
     else:
-        music_responses = [
-            f"你說「{user_message}」讓我想到一首歌！說「隨機」讓我推薦給你 🎵",
-            "想聽音樂嗎？說「音樂」我來幫你選！🎶",
-            f"「{user_message}」...有趣！要不要聽首歌轉換心情？🎼",
-            "我是音樂機器人！說「幫助」看看我能做什麼 🎵",
-        ]
-        return random.choice(music_responses), "text"
+        return f"🤔 我沒理解「{message}」的意思\n\n試試這些指令：\n• 「待辦」- 主選單\n• 「新增 任務內容」- 新增任務\n• 「查看待辦事項」- 查看任務\n• 「幫助」- 完整功能列表", "text"
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_message = event.message.text
-    reply_content, reply_type = get_smart_reply(user_message)
+    user_id = event.source.user_id  # 取得用戶ID
+    
+    reply_content, reply_type = get_smart_reply(user_message, user_id)
     
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         
         if reply_type == "template":
-            # 發送模板訊息
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
@@ -230,7 +345,6 @@ def handle_message(event):
                 )
             )
         else:
-            # 發送文字訊息
             line_bot_api.reply_message_with_http_info(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
