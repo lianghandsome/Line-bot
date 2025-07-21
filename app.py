@@ -1,485 +1,177 @@
 from flask import Flask, request, abort
 import os
 import json
-from datetime import datetime, timedelta
-import re
-import sqlite3 # 導入 SQLite
-from linebot.v3 import (
-    WebhookHandler
-)
-from linebot.v3.exceptions import (
-    InvalidSignatureError
-)
+from datetime import datetime
+from linebot.v3 import WebhookHandler
+from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
-    Configuration,
-    ApiClient,
-    MessagingApi,
-    ReplyMessageRequest,
-    TextMessage,
-    TemplateMessage,
-    ButtonsTemplate,
-    MessageAction
+    Configuration, ApiClient, MessagingApi,
+    ReplyMessageRequest, TextMessage
 )
-from linebot.v3.webhooks import (
-    MessageEvent,
-    TextMessageContent
-)
+from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 app = Flask(__name__)
 
-# LINE Bot 配置
-configuration = Configuration(access_token='IOjd7xRA4ZwlMNxS6H57U1KixD3RtvE3d4P4iAeVYdSbTMANZmKIooyvK98EEUgds3M/nkOubYsJNTNu5Z8rnEbULqAGyicU/bN5nh4OZVqeDmIE/2K5RNvlXsrCKqtjJ1yBJ6FRmmQW5LNxc6NdggdB04t89/1O/w1cDnyilFU=')
-handler = WebhookHandler('69258da7d559a4ef4709a9ba6dcbb1b1')
+# LINE Bot 設定 - 請替換成你的 Token 和 Secret
+ACCESS_TOKEN = 'YOUR_ACCESS_TOKEN_HERE'
+CHANNEL_SECRET = 'YOUR_CHANNEL_SECRET_HERE'
 
-# --- 修改 TodoManager 類別以使用 SQLite ---
-class TodoManager:
-    def __init__(self, db_file='data/todos.db'):
-        self.db_file = db_file
-        self._init_db()
-    
-    def _init_db(self):
-        """初始化資料庫並創建表格"""
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS todos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
-                task TEXT NOT NULL,
-                deadline TEXT,
-                priority TEXT DEFAULT '一般',
-                completed INTEGER DEFAULT 0,
-                created_at TEXT
-            )
-        ''')
-        conn.commit()
-        conn.close()
+configuration = Configuration(access_token=ACCESS_TOKEN)
+handler = WebhookHandler(CHANNEL_SECRET)
 
-    def add_todo(self, user_id, task, deadline=None, priority='一般'):
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
-        created_at = datetime.now().strftime('%Y-%m-%d %H:%M')
-        cursor.execute(
-            "INSERT INTO todos (user_id, task, deadline, priority, completed, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, task, deadline, priority, 0, created_at)
-        )
-        todo_id = cursor.lastrowid # 獲取新插入任務的 ID
-        conn.commit()
-        conn.close()
-        return todo_id
-    
-    def get_todos(self, user_id, show_completed=False):
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
-        
-        query = "SELECT id, task, deadline, priority, completed, created_at FROM todos WHERE user_id = ?"
-        params = [user_id]
-        
-        if not show_completed:
-            query += " AND completed = 0"
-        
-        # 排序邏輯
-        query += " ORDER BY completed ASC, deadline ASC, id ASC"
-            
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-        
-        todos = []
-        for row in rows:
-            todos.append({
-                'id': row[0],
-                'task': row[1],
-                'deadline': row[2],
-                'priority': row[3],
-                'completed': bool(row[4]), # SQLite 0/1 轉換為 True/False
-                'created_at': row[5]
-            })
-        conn.close()
-        return todos
-    
-    def complete_todo(self, user_id, todo_id):
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE todos SET completed = 1 WHERE user_id = ? AND id = ?",
-            (user_id, todo_id)
-        )
-        rows_affected = cursor.rowcount
-        conn.commit()
-        conn.close()
-        return rows_affected > 0
-    
-    def delete_todo(self, user_id, todo_id):
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM todos WHERE user_id = ? AND id = ?",
-            (user_id, todo_id)
-        )
-        rows_affected = cursor.rowcount
-        conn.commit()
-        conn.close()
-        return rows_affected > 0
-    
-    def get_today_todos(self, user_id):
-        today = datetime.now().strftime('%Y-%m-%d')
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, task, deadline, priority, completed, created_at FROM todos WHERE user_id = ? AND deadline = ? AND completed = 0 ORDER BY id ASC",
-            (user_id, today)
-        )
-        rows = cursor.fetchall()
-        todos = []
-        for row in rows:
-            todos.append({
-                'id': row[0],
-                'task': row[1],
-                'deadline': row[2],
-                'priority': row[3],
-                'completed': bool(row[4]),
-                'created_at': row[5]
-            })
-        conn.close()
-        return todos
-    
-    def get_urgent_todos(self, user_id):
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, task, deadline, priority, completed, created_at FROM todos WHERE user_id = ? AND priority = '緊急' AND completed = 0 ORDER BY id ASC",
-            (user_id,)
-        )
-        rows = cursor.fetchall()
-        todos = []
-        for row in rows:
-            todos.append({
-                'id': row[0],
-                'task': row[1],
-                'deadline': row[2],
-                'priority': row[3],
-                'completed': bool(row[4]),
-                'created_at': row[5]
-            })
-        conn.close()
-        return todos
+# 簡單的記憶體儲存（重啟後會清空）
+user_notes = {}
 
-    def get_user_stats(self, user_id):
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
+class SimpleNoteManager:
+    def add_note(self, user_id, note_text):
+        """新增記事"""
+        if user_id not in user_notes:
+            user_notes[user_id] = []
         
-        cursor.execute("SELECT COUNT(*) FROM todos WHERE user_id = ?", (user_id,))
-        total = cursor.fetchone()[0]
+        note = {
+            'id': len(user_notes[user_id]) + 1,
+            'text': note_text,
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M')
+        }
+        user_notes[user_id].append(note)
+        return note['id']
+    
+    def get_notes(self, user_id):
+        """取得所有記事"""
+        return user_notes.get(user_id, [])
+    
+    def delete_note(self, user_id, note_id):
+        """刪除記事"""
+        if user_id not in user_notes:
+            return False
         
-        cursor.execute("SELECT COUNT(*) FROM todos WHERE user_id = ? AND completed = 1", (user_id,))
-        completed = cursor.fetchone()[0]
-        
-        pending = total - completed
-        conn.close()
-        return {"total": total, "completed": completed, "pending": pending}
+        notes = user_notes[user_id]
+        for i, note in enumerate(notes):
+            if note['id'] == note_id:
+                del notes[i]
+                return True
+        return False
+    
+    def clear_all_notes(self, user_id):
+        """清空所有記事"""
+        if user_id in user_notes:
+            user_notes[user_id] = []
+            return True
+        return False
 
-# 建立全域 TodoManager 實例，現在使用 SQLite 資料庫檔案
-todo_manager = TodoManager(db_file='data/todos.db')
+# 建立記事管理器
+note_manager = SimpleNoteManager()
 
-# --- 接下來的 Flask 路由和 Line Bot 處理邏輯保持不變 ---
+def handle_user_message(message, user_id):
+    """處理使用者訊息"""
+    message = message.strip()
+    
+    # 新增記事
+    if message.startswith('記 ') or message.startswith('新增 '):
+        note_text = message[2:].strip()
+        if note_text:
+            note_id = note_manager.add_note(user_id, note_text)
+            return f"✅ 記事已儲存！\n📝 內容: {note_text}\n🆔 編號: {note_id}\n⏰ 時間: {datetime.now().strftime('%H:%M')}"
+        else:
+            return "❌ 請輸入記事內容！\n範例: 記 買牛奶"
+    
+    # 查看記事
+    elif any(word in message for word in ['查看', '記事', '列表', 'list']):
+        notes = note_manager.get_notes(user_id)
+        if not notes:
+            return "📝 目前沒有記事\n輸入「記 內容」來新增第一則記事！"
+        
+        result = "📋 你的記事清單:\n" + "="*20 + "\n"
+        for note in notes:
+            result += f"\n🆔 [{note['id']}] {note['text']}\n"
+            result += f"⏰ {note['time']}\n"
+        
+        result += f"\n💡 刪除記事: 刪除 [編號]"
+        return result
+    
+    # 刪除記事
+    elif message.startswith('刪除 '):
+        try:
+            note_id = int(message[3:].strip())
+            if note_manager.delete_note(user_id, note_id):
+                return f"🗑️ 已刪除記事 {note_id}"
+            else:
+                return f"❌ 找不到編號 {note_id} 的記事"
+        except ValueError:
+            return "❌ 請輸入正確格式: 刪除 [編號]\n範例: 刪除 1"
+    
+    # 清空所有記事
+    elif any(word in message for word in ['清空', '全部刪除', 'clear']):
+        if note_manager.clear_all_notes(user_id):
+            return "🗑️ 已清空所有記事！"
+        else:
+            return "📝 目前沒有記事可清空"
+    
+    # 使用說明
+    elif any(word in message for word in ['幫助', 'help', '說明', '功能']):
+        return """📱 記事機器人使用說明:
+
+📝 新增記事:
+• 記 [內容]
+• 新增 [內容]
+
+📋 查看記事:
+• 查看
+• 記事
+• 列表
+
+🗑️ 刪除記事:
+• 刪除 [編號]
+• 清空 (刪除全部)
+
+💡 範例:
+• 記 明天要買菜
+• 記 下午3點開會
+• 查看
+• 刪除 1"""
+    
+    # 問候語
+    elif any(word in message for word in ['你好', 'hello', 'hi', '嗨']):
+        return "👋 哈囉！我是記事機器人！\n\n📝 快速開始:\n• 輸入「記 內容」新增記事\n• 輸入「查看」看所有記事\n• 輸入「幫助」看完整功能"
+    
+    # 預設回應
+    else:
+        return f"🤔 不太懂「{message}」的意思\n\n💡 試試這些:\n• 記 今天要做的事\n• 查看\n• 幫助"
+
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-    app.logger.info("Request body: " + body)
-
+    
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
-        app.logger.info("Invalid signature. Please check your channel access token/channel secret.")
         abort(400)
-
+    
     return 'OK'
 
 @app.route("/", methods=['GET'])
 def home():
-    """簡單的健康檢查頁面"""
-    return "LINE Bot 待辦事項助手正在運行中！"
-
-@app.route("/debug/<user_id>", methods=['GET'])
-def debug_user(user_id):
-    """除錯使用者資料的端點"""
-    todos = todo_manager.get_todos(user_id, show_completed=True)
-    stats = todo_manager.get_user_stats(user_id)
-    
-    debug_info = {
-        "user_id": user_id,
-        "stats": stats,
-        "todos": todos
-    }
-    
-    return f"<pre>{json.dumps(debug_info, ensure_ascii=False, indent=2)}</pre>"
-
-def parse_date(date_str):
-    """解析日期字串"""
-    try:
-        # 處理不同的日期格式
-        date_formats = ['%Y-%m-%d', '%m-%d', '%Y/%m/%d', '%m/%d']
-        
-        for fmt in date_formats:
-            try:
-                if fmt in ['%m-%d', '%m/%d']:
-                    # 如果只有月日，加上今年
-                    date_obj = datetime.strptime(date_str, fmt)
-                    current_year = datetime.now().year
-                    return date_obj.replace(year=current_year).strftime('%Y-%m-%d')
-                else:
-                    return datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
-            except ValueError:
-                continue
-                
-        # 處理相對日期
-        today = datetime.now()
-        if '今天' in date_str or '今日' in date_str:
-            return today.strftime('%Y-%m-%d')
-        elif '明天' in date_str or '明日' in date_str:
-            return (today + timedelta(days=1)).strftime('%Y-%m-%d')
-        elif '後天' in date_str:
-            return (today + timedelta(days=2)).strftime('%Y-%m-%d')
-        
-        return None
-    except:
-        return None
-
-def create_todo_menu():
-    """建立待辦事項選單"""
-    return TemplateMessage(
-        alt_text='待辦事項選單',
-        template=ButtonsTemplate(
-            title='📅 我的待辦事項助手',
-            text='選擇你要進行的操作：',
-            actions=[
-                MessageAction(label='📋 查看待辦事項', text='查看待辦事項'),
-                MessageAction(label='📝 新增待辦事項', text='如何新增待辦事項'),
-                MessageAction(label='⏰ 今日待辦', text='今日待辦'),
-                MessageAction(label='❗ 緊急事項', text='緊急事項')
-            ]
-        )
-    )
-
-def format_todo_list(todos, title="📋 你的待辦事項"):
-    """格式化待辦事項列表"""
-    if not todos:
-        return f"{title}\n\n目前沒有待辦事項！\n輸入「新增 任務內容」來添加第一個任務 📝"
-    
-    result = f"{title}\n"
-    result += "=" * 20 + "\n"
-    
-    for todo in todos:
-        status = "✅" if todo['completed'] else "⭕"
-        priority_emoji = {"緊急": "🔥", "重要": "⚡", "一般": "📌"}
-        priority = priority_emoji.get(todo['priority'], "📌")
-        
-        result += f"\n{status} [{todo['id']}] {priority} {todo['task']}\n"
-        
-        if todo.get('deadline'):
-            try:
-                deadline_date = datetime.strptime(todo['deadline'], '%Y-%m-%d')
-                today = datetime.now()
-                days_diff = (deadline_date.date() - today.date()).days
-                
-                if days_diff < 0:
-                    result += f"   ⏰ 已過期 ({todo['deadline']}) ⚠️\n"
-                elif days_diff == 0:
-                    result += f"   ⏰ 今天到期！\n"
-                elif days_diff == 1:
-                    result += f"   ⏰ 明天到期\n"
-                else:
-                    result += f"   ⏰ {todo['deadline']} ({days_diff}天後)\n"
-            except:
-                result += f"   ⏰ {todo['deadline']}\n"
-        
-        result += f"   📅 建立時間: {todo['created_at']}\n"
-    
-    result += f"\n💡 小提示：\n"
-    result += f"• 輸入「完成 [編號]」標記完成\n"
-    result += f"• 輸入「刪除 [編號]」刪除項目\n"
-    result += f"• 輸入「新增 任務內容」添加新任務"
-    
-    return result
-
-def get_smart_reply(user_message, user_id):
-    """智能回應函數"""
-    message = user_message.strip()
-    
-    # 除錯指令 (僅用於測試)
-    if message == "除錯":
-        stats = todo_manager.get_user_stats(user_id)
-        todos = todo_manager.get_todos(user_id, show_completed=True)
-        return f"📊 使用者統計:\n總任務: {stats['total']}\n已完成: {stats['completed']}\n未完成: {stats['pending']}\n\n目前有 {len(todos)} 個任務", "text"
-    
-    # 待辦事項主選單
-    if any(word in message for word in ['待辦', '行事曆', '任務', 'todo', '選單']):
-        return create_todo_menu(), "template"
-    
-    # 新增待辦事項
-    elif message.startswith('新增 ') or message.startswith('加入 ') or message.startswith('添加 '):
-        task_content = message[3:].strip()  # 移除「新增 」
-        
-        # 解析優先級
-        priority = '一般'
-        if '緊急' in task_content or '急' in task_content:
-            priority = '緊急'
-            task_content = task_content.replace('緊急', '').replace('急', '').strip()
-        elif '重要' in task_content:
-            priority = '重要'
-            task_content = task_content.replace('重要', '').strip()
-        
-        # 解析截止日期
-        deadline = None
-        date_pattern = r'(\d{4}-\d{2}-\d{2}|\d{1,2}-\d{1,2}|\d{4}/\d{1,2}/\d{1,2}|\d{1,2}/\d{1,2}|今天|明天|後天)'
-        date_match = re.search(date_pattern, task_content)
-        
-        if date_match:
-            date_str = date_match.group(1)
-            deadline = parse_date(date_str)
-            task_content = re.sub(date_pattern, '', task_content).strip()
-        
-        if not task_content:
-            return "❌ 請輸入任務內容！\n\n範例：\n• 新增 買牛奶\n• 新增 開會 2024-07-25\n• 新增 緊急 繳電費 明天", "text"
-        
-        todo_id = todo_manager.add_todo(user_id, task_content, deadline, priority)
-        
-        response = f"✅ 成功新增待辦事項！\n\n"
-        response += f"📌 任務: {task_content}\n"
-        response += f"🏷️ 優先級: {priority}\n"
-        if deadline:
-            response += f"⏰ 截止日期: {deadline}\n"
-        response += f"🆔 編號: {todo_id}\n\n"
-        response += "輸入「查看待辦事項」來查看所有任務！"
-        
-        return response, "text"
-    
-    # 查看待辦事項
-    elif any(word in message for word in ['查看待辦', '待辦事項', '任務列表', '查看任務']):
-        todos = todo_manager.get_todos(user_id)
-        return format_todo_list(todos), "text"
-    
-    # 今日待辦
-    elif any(word in message for word in ['今日待辦', '今天的任務', '今天待辦']):
-        today_todos = todo_manager.get_today_todos(user_id)
-        return format_todo_list(today_todos, "⏰ 今日待辦事項"), "text"
-    
-    # 緊急事項
-    elif any(word in message for word in ['緊急事項', '緊急任務', '急件']):
-        urgent_todos = todo_manager.get_urgent_todos(user_id)
-        return format_todo_list(urgent_todos, "🔥 緊急事項"), "text"
-    
-    # 完成任務
-    elif message.startswith('完成 ') or message.startswith('做完 '):
-        try:
-            todo_id = int(message.split(' ')[1])
-            if todo_manager.complete_todo(user_id, todo_id):
-                return f"🎉 太棒了！任務 {todo_id} 已標記為完成！\n\n繼續保持，你做得很好！💪", "text"
-            else:
-                return f"❌ 找不到編號 {todo_id} 的任務。\n\n輸入「查看待辦事項」確認編號。", "text"
-        except (IndexError, ValueError):
-            return "❌ 請輸入正確格式：完成 [編號]\n\n例如：完成 1", "text"
-    
-    # 刪除任務
-    elif message.startswith('刪除 ') or message.startswith('移除 '):
-        try:
-            todo_id = int(message.split(' ')[1])
-            if todo_manager.delete_todo(user_id, todo_id):
-                return f"🗑️ 已刪除任務 {todo_id}！", "text"
-            else:
-                return f"❌ 找不到編號 {todo_id} 的任務。", "text"
-        except (IndexError, ValueError):
-            return "❌ 請輸入正確格式：刪除 [編號]\n\n例如：刪除 1", "text"
-    
-    # 使用說明
-    elif any(word in message for word in ['如何新增', '怎麼新增', '新增方法', '使用說明']):
-        return """📝 新增待辦事項說明：
-
-🔤 基本格式：
-新增 任務內容
-
-📅 含日期：
-新增 任務內容 日期
-• 新增 買牛奶 今天
-• 新增 開會 2024-07-25  
-• 新增 繳費 12-25
-
-🏷️ 設定優先級：
-• 新增 緊急 繳稅 明天
-• 新增 重要 面試 2024-08-01
-
-💡 更多範例：
-• 新增 買菜
-• 新增 看醫生 明天
-• 新增 緊急 報告 後天
-• 新增 重要 會議 8-15
-
-試試看吧！""", "text"
-    
-    # 問候語
-    elif any(word in message for word in ['你好', 'hello', 'hi', '嗨']):
-        return "👋 哈囉！我是你的個人待辦事項助手！\n\n📋 我可以幫你：\n• 記錄要做的事情\n• 設定截止日期\n• 提醒緊急任務\n• 追蹤完成進度\n\n輸入「待辦」開始使用，或「使用說明」看教學！", "text"
-    
-    # 幫助
-    elif any(word in message for word in ['幫助', 'help', '功能']):
-        return """📱 待辦事項機器人功能：
-
-📝 新增任務：
-• 新增 [任務內容]
-• 新增 [任務] [日期]
-• 新增 緊急/重要 [任務]
-
-📋 查看任務：
-• 查看待辦事項 - 所有未完成
-• 今日待辦 - 今天要做的
-• 緊急事項 - 緊急任務
-
-✅ 管理任務：
-• 完成 [編號] - 標記完成
-• 刪除 [編號] - 刪除任務
-
-🎯 其他：
-• 待辦 - 主選單
-• 使用說明 - 詳細教學
-
-現在就試試「新增 買晚餐」吧！""", "text"
-    
-    # 預設回應
-    else:
-        return f"🤔 我沒理解「{message}」的意思\n\n試試這些指令：\n• 「待辦」- 主選單\n• 「新增 任務內容」- 新增任務\n• 「查看待辦事項」- 查看任務\n• 「幫助」- 完整功能列表", "text"
+    return "記事機器人運行中 🤖"
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_message = event.message.text
-    user_id = event.source.user_id  # 取得使用者ID
+    user_id = event.source.user_id
     
-    # 記錄日誌以便除錯
-    print(f"收到訊息: {user_message}, 使用者ID: {user_id}")
+    # 處理訊息並取得回應
+    reply_text = handle_user_message(user_message, user_id)
     
-    reply_content, reply_type = get_smart_reply(user_message, user_id)
-    
+    # 回覆訊息
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
-        
-        if reply_type == "template":
-            line_bot_api.reply_message_with_http_info(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[reply_content]
-                )
+        line_bot_api.reply_message_with_http_info(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[TextMessage(text=reply_text)]
             )
-        else:
-            line_bot_api.reply_message_with_http_info(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=reply_content)]
-                )
-            )
+        )
 
 if __name__ == "__main__":
-    # 確保資料目錄存在
-    os.makedirs('data', exist_ok=True)
-    
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
