@@ -1,0 +1,12 @@
+# 環境變數 / 祕密
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# 編輯器
+.vscode/
+.idea/
