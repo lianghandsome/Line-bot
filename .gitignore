@@ -1,11 +1,15 @@
 # 環境變數 / 祕密
 .env
 
+# 本機 SQLite 資料庫
+*.db
+
 # Python
 __pycache__/
 *.pyc
 venv/
 .venv/
+.pytest_cache/
 
 # 編輯器
 .vscode/

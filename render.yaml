@@ -1,0 +1,23 @@
+# Render Blueprint：讓 Render 自動照這個檔案建好整個服務，
+# 你只要在套用時填 3 個祕密值就好，不用手動填一堆欄位。
+#
+# 用法：Render Dashboard → New + → Blueprint → 選這個 repo → Apply
+services:
+  - type: web
+    name: line-bot
+    runtime: python
+    plan: free
+    region: oregon            # 要跟 Neon 的 region 一致；改這裡也要改 Neon
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false            # 套用時 Render 會問你，貼上 LINE 後台重發的 token
+      - key: LINE_CHANNEL_SECRET
+        sync: false            # 同上，貼 secret
+      - key: DATABASE_URL
+        sync: false            # 貼 Neon 的 postgresql://... 連線字串

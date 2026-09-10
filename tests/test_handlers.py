@@ -38,6 +38,11 @@ def test_home_route():
     assert "記帳機器人" in r.get_data(as_text=True)
 
 
+def test_healthz():
+    r = app.app.test_client().get("/healthz")
+    assert r.status_code == 200
+    assert r.get_data(as_text=True) == "ok"
+
 
 def test_callback_rejects_bad_signature():
     r = app.app.test_client().post(
