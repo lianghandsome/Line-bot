@@ -3,14 +3,16 @@
 使用方式（傳訊息給 bot）：
     支出 150 餐飲 午餐            記一筆支出
     收入 5000 薪水 月薪           記一筆收入
-    +50 咖啡                     支出簡寫
-    -3000 兼職                   收入簡寫
+    +50 咖啡 星巴克 昨天          支出簡寫（可帶日期）
+    -3000 兼職 家教費            收入簡寫
     帳單 / 本週帳單 / 今天帳單     查看記錄
     統計 / 本月統計              收支統計
     刪除 3                       刪除編號 3 的記錄
+    分類 / 幫助                   說明
 """
 import os
 import re
+from datetime import datetime, timedelta
 
 from flask import Flask, request, abort
 from linebot.v3 import WebhookHandler
@@ -33,10 +35,18 @@ app = Flask(__name__)
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
+# 啟動時確保資料表存在
 db.init_db()
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
-    app.logger.warning("尚未設定 LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET")
+    app.logger.warning(
+        "尚未設定 LINE_CHANNEL_ACCESS_TOKEN / LINE_CHANNEL_SECRET，"
+        "可以開首頁和測試資料庫，但無法實際收發 LINE 訊息。"
+    )
+
+# 常用分類（僅供提示，實際可自訂）
+EXPENSE_CATEGORIES = ["餐飲", "交通", "購物", "娛樂", "醫療", "生活", "房租", "水電", "教育", "其他"]
+INCOME_CATEGORIES = ["薪水", "獎金", "投資", "兼職", "紅包", "其他"]
 
 EXPENSE_KEYWORDS = {"支出", "花費", "支", "expense", "exp"}
 INCOME_KEYWORDS = {"收入", "賺", "收", "income", "inc"}
@@ -45,6 +55,38 @@ INCOME_KEYWORDS = {"收入", "賺", "收", "income", "inc"}
 # --------------------------------------------------------------------------- #
 # 解析輸入
 # --------------------------------------------------------------------------- #
+def parse_date(text):
+    """把使用者輸入的日期字串轉成 YYYY-MM-DD，無法解析回傳 None。
+
+    支援：今天／昨天／前天／明天、YYYY-MM-DD、MM-DD（自動補今年），
+    分隔符 - 或 / 都可以。
+    """
+    text = text.strip()
+    today = taiwan_now()
+
+    relative = {
+        "今天": 0, "今日": 0,
+        "昨天": -1, "昨日": -1,
+        "前天": -2,
+        "明天": 1, "明日": 1,
+    }
+    for key, delta in relative.items():
+        if key in text:
+            return (today + timedelta(days=delta)).strftime("%Y-%m-%d")
+
+    parts = text.replace("/", "-").split("-")
+    try:
+        if len(parts) == 3:
+            year, month, day = (int(p) for p in parts)
+        elif len(parts) == 2:
+            year, month, day = today.year, int(parts[0]), int(parts[1])
+        else:
+            return None
+        return datetime(year, month, day).strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
 def parse_accounting_input(message):
     """解析記帳輸入，成功回傳 dict，否則回傳 None。"""
     message = message.strip()
@@ -72,14 +114,22 @@ def parse_accounting_input(message):
         return None
 
     category = parts[2]
-    description = " ".join(parts[3:]) if len(parts) > 3 else category
+
+    description_parts, record_date = [], None
+    for token in parts[3:]:
+        parsed = parse_date(token)
+        if parsed and not record_date:
+            record_date = parsed
+        else:
+            description_parts.append(token)
+    description = " ".join(description_parts) if description_parts else category
 
     return {
         "type": record_type,
         "amount": amount,
         "category": category,
         "description": description,
-        "date": None,
+        "date": record_date,
     }
 
 
@@ -138,7 +188,13 @@ def reply_list(user_id, message):
         title = f"📊 近 {days} 天記錄"
 
     if not records:
-        return f"{title}\n目前沒有記錄\n\n💡 試試：支出 100 餐飲 午餐"
+        return (
+            f"{title}\n目前沒有記錄\n\n"
+            "💡 開始記帳：\n"
+            "• 支出 100 餐飲 午餐\n"
+            "• 收入 5000 薪水\n"
+            "• +50 咖啡（支出簡寫）"
+        )
 
     lines = [title, "=" * 22]
     for r in records[:10]:
@@ -197,18 +253,35 @@ def reply_delete(user_id, message):
 HELP_TEXT = """💰 記帳機器人使用說明
 
 📝 記帳：
-• 支出 [金額] [分類] [說明]
-• 收入 [金額] [分類] [說明]
-• +[金額] [分類]（支出簡寫）
-• -[金額] [分類]（收入簡寫）
+• 支出 [金額] [分類] [說明] [日期]
+• 收入 [金額] [分類] [說明] [日期]
+• +[金額] [分類] [說明]（支出簡寫）
+• -[金額] [分類] [說明]（收入簡寫）
 
-📊 查看：帳單 / 今天帳單 / 本週帳單、統計 / 本月統計
-🗑️ 刪除：刪除 [編號]
+📊 查看：
+• 帳單 / 今天帳單 / 本週帳單 / 本月帳單
+• 統計 / 今天統計 / 本月統計
+
+🗑️ 管理：
+• 刪除 [編號]
+• 分類（查看常用分類）
+
+📅 日期可用：今天、昨天、前天、12-31、2025/12/31
 
 範例：
 • 支出 150 餐飲 午餐
 • 收入 5000 薪水 月薪
+• +50 咖啡 星巴克 昨天
 • 本月統計"""
+
+
+def reply_categories():
+    return (
+        "🏷️ 常用分類參考\n\n"
+        "💸 支出：" + "、".join(EXPENSE_CATEGORIES) + "\n"
+        "💰 收入：" + "、".join(INCOME_CATEGORIES) + "\n\n"
+        "💡 也可以直接輸入自訂分類名稱"
+    )
 
 
 def handle_user_message(message, user_id):
@@ -224,18 +297,28 @@ def handle_user_message(message, user_id):
         return reply_list(user_id, message)
     if any(w in message for w in ("統計", "總結", "分析", "summary")):
         return reply_summary(user_id, message)
+    if any(w in message for w in ("分類", "類別", "category")):
+        return reply_categories()
     if any(w in message for w in ("幫助", "說明", "help", "功能", "?", "？")):
         return HELP_TEXT
+    if any(w in message for w in ("你好", "哈囉", "嗨", "hello", "hi")):
+        s = db.get_summary(user_id)
+        head = "👋 哈囉！我是記帳機器人\n\n"
+        if s["record_count"]:
+            head += f"💵 你目前的淨收支：{format_amount(s['balance'])}（{s['record_count']} 筆）\n\n"
+        return head + "輸入「幫助」看完整說明，或直接試試：\n• 支出 100 餐飲 午餐\n• 帳單\n• 統計"
 
     return (
         f"🤔 看不懂「{message}」\n\n"
-        "試試：\n• 支出 100 餐飲 午餐\n• 帳單\n• 統計\n• 幫助"
+        "試試：\n• 支出 100 餐飲 午餐\n• 收入 5000 薪水\n• 帳單\n• 統計\n• 幫助"
     )
 
 
 # --------------------------------------------------------------------------- #
 # 路由
 # --------------------------------------------------------------------------- #
+
+
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
