@@ -85,3 +85,51 @@ def get_records(user_id, days=None):
     with _cursor() as cur:
         cur.execute(sql, params)
         return [dict(row) for row in cur.fetchall()]
+
+
+def get_records_on(user_id, date_str):
+    """取得使用者在指定某一天的記錄。"""
+    with _cursor() as cur:
+        cur.execute(
+            "SELECT * FROM records WHERE user_id = ? AND record_date = ? "
+            "ORDER BY created_at DESC",
+            (user_id, date_str),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
+def delete_record(user_id, seq):
+    """刪除指定流水號的記錄，回傳是否有刪到。"""
+    with _cursor(commit=True) as cur:
+        cur.execute(
+            "DELETE FROM records WHERE user_id = ? AND seq = ?",
+            (user_id, seq),
+        )
+        return cur.rowcount > 0
+
+
+def get_summary(user_id, days=None):
+    """收支統計：總收入、總支出、淨額、各分類金額、筆數。"""
+    records = get_records(user_id, days)
+    total_income = sum(r["amount"] for r in records if r["type"] == "income")
+    total_expense = sum(r["amount"] for r in records if r["type"] == "expense")
+
+    categories = {}
+    for r in records:
+        bucket = categories.setdefault(r["category"], {"income": 0.0, "expense": 0.0})
+        bucket[r["type"]] += r["amount"]
+
+    return {
+        "total_income": total_income,
+        "total_expense": total_expense,
+        "balance": total_income - total_expense,
+        "categories": categories,
+        "record_count": len(records),
+    }
+
+
+def count_all_records():
+    """全體記錄總數（給首頁狀態頁用）。"""
+    with _cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM records")
+        return cur.fetchone()["n"]
