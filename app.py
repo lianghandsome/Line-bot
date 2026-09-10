@@ -334,6 +334,7 @@ def callback():
 def home():
     return (
         "<h1>💰 記帳機器人運行中</h1>"
+        f"<p>資料庫：{db.BACKEND}</p>"
         f"<p>總記錄數：{db.count_all_records()} 筆</p>"
         f"<p>伺服器時間：{taiwan_now().strftime('%Y-%m-%d %H:%M:%S')}（台灣）</p>"
     )

@@ -10,3 +10,7 @@ except ImportError:
 
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
+
+# 有設定 DATABASE_URL 就用 PostgreSQL（雲端持久化）；
+# 沒設定時 db.py 會自動改用本機 SQLite 檔，方便在自己電腦上測試。
+DATABASE_URL = os.getenv("DATABASE_URL")
