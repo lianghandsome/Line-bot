@@ -1,3 +1,5 @@
 flask>=3.0,<4
 gunicorn>=21.2
 line-bot-sdk>=3.8,<4
+python-dotenv>=1.0
+tzdata
